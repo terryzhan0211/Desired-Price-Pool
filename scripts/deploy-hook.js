@@ -1,62 +1,105 @@
 const hre = require("hardhat");
 
 async function main() {
-  // For testing, we first need to deploy a mock IPoolManager contract
-  // In a real deployment, you would use the actual Uniswap v4 PoolManager address
-  console.log("Deploying mock PoolManager for testing...");
-  const MockPoolManager = await hre.ethers.getContractFactory("MockPoolManager");
-  const mockPoolManager = await MockPoolManager.deploy();
+  // First, get the deployed vDPP token or deploy it if not already deployed
+  let vDPPTokenAddress;
+  
+  // Try to get vDPP token address from previous deployment
+  try {
+    const deployData = require('../deployments.json');
+    vDPPTokenAddress = deployData.vDPPToken;
+    console.log(`Using existing vDPP Token at: ${vDPPTokenAddress}`);
+  } catch (error) {
+    console.log("No existing deployment found, deploying vDPP Token first...");
+    
+    const vDPPToken = await hre.ethers.deployContract("vDPPToken");
+    await vDPPToken.waitForDeployment();
+    vDPPTokenAddress = vDPPToken.target;
+    
+    console.log(`vDPP Token deployed to: ${vDPPTokenAddress}`);
+  }
+
+  // For testing, we'll use a mock pool manager
+  console.log("Deploying Mock Pool Manager...");
+  const mockPoolManager = await hre.ethers.deployContract("MockPoolManager");
   await mockPoolManager.waitForDeployment();
-  console.log(`Mock PoolManager deployed to: ${mockPoolManager.target}`);
-  
-  // Deploy vDPP Token if not already deployed
-  console.log("Deploying vDPP Token...");
-  const vDPPToken = await hre.ethers.deployContract("vDPPToken");
-  await vDPPToken.waitForDeployment();
-  console.log(`vDPP Token deployed to: ${vDPPToken.target}`);
-  
-  // Get the deployer address
+  console.log(`Mock Pool Manager deployed to: ${mockPoolManager.target}`);
+
+  // Get the deployer address for governance
   const [deployer] = await hre.ethers.getSigners();
   
   // Deploy the DesiredPriceHook
-  console.log("Deploying DesiredPriceHook...");
-  const DesiredPriceHook = await hre.ethers.getContractFactory("DesiredPriceHook");
-  const dppHook = await DesiredPriceHook.deploy(
-    mockPoolManager.target,   // IPoolManager address
-    vDPPToken.target,         // vDPP token address
-    deployer.address          // Initial governance address
+  console.log("Deploying Desired Price Hook...");
+  const desiredPriceHook = await hre.ethers.deployContract("DesiredPriceHook", [
+    mockPoolManager.target,
+    vDPPTokenAddress,
+    deployer.address // Set deployer as governance initially
+  ]);
+  
+  await desiredPriceHook.waitForDeployment();
+  console.log(`Desired Price Hook deployed to: ${desiredPriceHook.target}`);
+
+  // Configure vDPP token to allow hook to mint rewards
+  console.log("Setting DPP Hook in vDPP Token...");
+  const vDPPToken = await hre.ethers.getContractAt("vDPPToken", vDPPTokenAddress);
+  await vDPPToken.setDPPHook(desiredPriceHook.target);
+  console.log("DPP Hook set in vDPP Token");
+
+  // Save deployment information
+  const fs = require('fs');
+  const deploymentData = {
+    vDPPToken: vDPPTokenAddress,
+    mockPoolManager: mockPoolManager.target,
+    desiredPriceHook: desiredPriceHook.target,
+    network: hre.network.name,
+    timestamp: new Date().toISOString()
+  };
+  
+  fs.writeFileSync(
+    'deployments.json',
+    JSON.stringify(deploymentData, null, 2)
   );
-  await dppHook.waitForDeployment();
-  console.log(`DesiredPriceHook deployed to: ${dppHook.target}`);
-  
-  // Set the DPP Hook address in the vDPP token contract
-  console.log("Setting DPP Hook address in vDPP Token...");
-  const setDPPHookTx = await vDPPToken.setDPPHook(dppHook.target);
-  await setDPPHookTx.wait();
-  console.log("DPP Hook address set in vDPP Token");
-  
-  // Verify the contracts on Etherscan (if on a supported network)
+  console.log("Deployment information saved to deployments.json");
+
+  // Verify contracts on Etherscan if not on a local network
   if (hre.network.name !== "hardhat" && hre.network.name !== "localhost") {
-    console.log("Waiting for block confirmations...");
-    await dppHook.deploymentTransaction().wait(5);
+    console.log("Waiting for block confirmations before verification...");
+    await desiredPriceHook.deploymentTransaction().wait(5);
     
     console.log("Verifying contracts on Etherscan...");
-    await hre.run("verify:verify", {
-      address: vDPPToken.target,
-      constructorArguments: [],
-    });
+    try {
+      await hre.run("verify:verify", {
+        address: vDPPTokenAddress,
+        constructorArguments: []
+      });
+    } catch (error) {
+      console.log("vDPP Token verification failed or already verified:", error.message);
+    }
     
-    await hre.run("verify:verify", {
-      address: dppHook.target,
-      constructorArguments: [
-        mockPoolManager.target,
-        vDPPToken.target,
-        deployer.address
-      ],
-    });
+    try {
+      await hre.run("verify:verify", {
+        address: mockPoolManager.target,
+        constructorArguments: []
+      });
+    } catch (error) {
+      console.log("MockPoolManager verification failed or already verified:", error.message);
+    }
+    
+    try {
+      await hre.run("verify:verify", {
+        address: desiredPriceHook.target,
+        constructorArguments: [
+          mockPoolManager.target,
+          vDPPTokenAddress,
+          deployer.address
+        ]
+      });
+    } catch (error) {
+      console.log("DesiredPriceHook verification failed or already verified:", error.message);
+    }
   }
 
-  return { vDPPToken, dppHook };
+  return { vDPPToken: vDPPTokenAddress, desiredPriceHook: desiredPriceHook.target };
 }
 
 // Execute the script
